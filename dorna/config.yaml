@@ -2,10 +2,10 @@ axis:
   number: 5
 calibrate:
   j0: -8.2671
-  j1: 139.7344
+  j1: 139.73441
   j2: -87.1807
-  j3: 220.2257
-  j4:  -65.439
+  j3: 44.60789999999997
+  j4: 188.44150000000002
 default_jerk:
   joint:
   - 300
@@ -14,14 +14,16 @@ default_jerk:
   - 300
   - 300
   xyz:
-  - 50
-  - 50
-  - 50
+  - 1270.0
+  - 1270.0
+  - 1270.0
   - 300
   - 300
 default_speed:
-  joint: 1000
-  xyz: 100
+  joint: 2000
+  xyz: 2540.0
+homing:
+  probe_offset: -69.5
 limit:
   j0:
   - -175.0
@@ -37,6 +39,6 @@ motion:
   gpa: 2
   jt: 1
 toolhead:
-  x: 1.74
+  x: 40.0
 unit:
-  length: inch
+  length: mm

@@ -65,6 +65,14 @@ class _port_usb(object):
 		return False
 
 
+# =================================================================
+# methods for working with angles
+# =================================================================
+
+# Return a number wrapped in the range [lo, hi)
+def wrap(a, lo, hi):
+	return np.mod(a - lo, hi - lo) + lo
+
 
 # =================================================================
 # handy methods
@@ -380,6 +388,8 @@ class Dorna(_port_usb, easy_method):
 		send_thread = threading.Thread(target = self._send)
 		send_thread.start()
 
+		self.last_received = ""
+		self.last_response = ""
 		receive_thread = threading.Thread(target = self._receive)
 		receive_thread.start()
 
@@ -1442,6 +1452,101 @@ class Dorna(_port_usb, easy_method):
 
 		return self.homed()
 
+	def _home_j3_j4_working(self):
+		start4 = 0
+		start5 = 0
+		#print('Setting up ports..')
+		for x in range(1, 10):
+			self._port.write(("{di" + str(x) + "fn: 0}\n").encode())
+			time.sleep(0.1)
+		self._port.write("{di4fn: 4}\n".encode())
+		time.sleep(0.1)
+		self._port.write("{di5fn: 4}\n".encode())
+		time.sleep(0.1)
+		self._port.write("{prb:n}\n".encode())
+		time.sleep(0.1)
+		self._port.write("{in:n}\n".encode())
+		time.sleep(0.1)
+		in4 = self.last_received['r']['in']['4']
+		in5 = self.last_received['r']['in']['5']
+		start4 = in4
+		start5 = in5
+
+		if start5 == 1:
+			#print('starting in red... moving out...')
+			for x in range(0, 30):
+				self._port.write("G91 G1 A4.0 B4.0 F2500\n".encode())
+				time.sleep(0.05)
+				self._port.write("{in:n}\n".encode())
+				time.sleep(0.1)
+				in4 = self.last_response['in']['4']
+				in5 = self.last_response['in']['5']
+				start4 = in4
+				start5 = in5
+				#print(str(in4) + ", " + str(in5))
+				if start5 == 0:
+					break
+
+		#print('homing....')
+		for x in range(0, 180):
+			self._port.write("G91 G1 A2.0 B2.0 F2500\n".encode())
+			time.sleep(0.05)
+			self._port.write("{in:n}\n".encode())
+			time.sleep(0.1)
+			in4 = self.last_response['in']['4']
+			in5 = self.last_response['in']['5']
+			#print(str(in4) + ", " + str(in5))
+			if in5 == 1:
+				#print('Found home switch...moving to next phase...')
+				self._port.write("G91 G1 A-20.0 B-20.0 F2500\n".encode())
+				time.sleep(1.0)
+				break
+
+		foundAlignment = False
+		phase = 0
+		moveInc = 1.0
+		while not foundAlignment:
+			self._port.write("{in:n}\n".encode())
+			time.sleep(0.1)
+			in4 = self.last_response['in']['4']
+			in5 = self.last_response['in']['5']
+			if in5 == 1 and in4 == 0:
+				self._port.write(("G91 G1 A-" + str(moveInc) + " B-" + str(moveInc) + " F2500\n").encode())
+				time.sleep(0.05)
+			elif in5 == 0 and in4 == 0:
+				self._port.write(("G91 G1 A" + str(moveInc) + " B-" + str(moveInc) + " F2500\n").encode())
+				time.sleep(0.05)
+			elif in5 == 0 and in4 == 1:
+				self._port.write(("G91 G1 A" + str(moveInc) + " B" + str(moveInc) + " F2500\n").encode())
+				time.sleep(0.05)
+			elif in5 == 1 and in4 == 1:
+				if phase == 0:
+					phase = 1
+					self._port.write("G91 G1 A-2.0 B2.0 F2500\n".encode())
+					time.sleep(1.0)
+					moveInc = 0.1
+				elif phase == 1:
+					phase = 2
+					self._port.write("G91 G1 A-1.0 B1.0 F2500\n".encode())
+					time.sleep(1.0)
+					moveInc = 0.05
+				elif phase == 2:
+					foundAlignment = True
+					#print("Found Alignment")
+					break
+
+		if foundAlignment:
+			offset = self._config["homing"]["probe_offset"]
+			self._port.write(("G91 G1 A" + str(offset) + " B" + str(-offset) + " F2500\n").encode())
+			ds = eval(self.device())
+			while ds['state'] == 1:
+				curPos = eval(self.position())
+				ds = eval(self.device())
+				print(curPos)
+				time.sleep(0.5)
+			self._port.write("G28.3 A0.0 B0.0\n".encode())
+			self._port.write("{tt32: {a: 1, b: 1}}\n".encode())
+			#print("J3 & J4 Homing Complete!")
 
 	# args: j0, j1, j2, j3 or j4
 	# 		list or JSON list
@@ -1458,9 +1563,11 @@ class Dorna(_port_usb, easy_method):
 		result = None
 		T = False
 		for joint in prm:
-			if all([T == False, joint in ["j3", "j4"]]):
-				result = self._home_joint_3_4()
-				T = True
+			if joint in ["j3", "j4"]:
+				# Only home 3 and 4 once
+				if not T:
+					result = self._home_j3_j4_working()
+					T = True
 			else:	
 				result = self._home_joint(joint)
 		return result
@@ -1489,11 +1596,53 @@ class Dorna(_port_usb, easy_method):
 	{di4fn: 4}
 
 	G38.3
+
+	Homing Procedure Notes
+	[Procedure originally came with api.py, but rewritten by Ben Snell,
+	@bensnell on github.com]
+	- Requires that the constant probe_offset is correctly set. This constant
+		is an additional float value defined in the config.yaml file. This value
+		is set like such:
+		...
+		homing:
+			probe_offset: 30.0
+		...
+		This is a constant offset to the probing distance for these joints.
+		This value is different from one robot to another, and depends
+		on how the magnets in the wrist are aligned during the 
+		assembly process. The purpose of this constant is to ensure that 
+		joint 3 homes to the same value every time. This constant ensures that 
+		the values returned from probing are reliably offset each time
+		to result in the same homing calculations.
+	- Joint 3 homing is repeatable as long as j3 is pointed outward,
+		in the direction of its parent arm, within 90 degrees in
+		either direction. The outward direction of joint 3 looks like this:
+										  ___
+						_________________/   \__
+					  _/___  			|	  |	|
+		<---	---|-|__•__|-|			|  •  | |
+			   		   \________________|     |_|
+			   		   					|	  |
+			   		   					|	  |
+			   		   					|	  |
+	- Joint 4 homing is repeatable as long as it is kept within 180
+		degrees of zero. 
+	- In order for any homing procedure to work right now, neither of the
+		joint 3 or 4 red homing lights may be on
 	"""
 	def _home_joint_3_4(self):
 		_input = [3,4]
 		# set_joint
 		self.set_joint({"j3": 0, "j4": 0}, True)
+
+		# Get the probe offset
+		probe_offset = 0.0
+		if "homing" in self._config and "probe_offset" in self._config["homing"]:
+			tmp = self._config["homing"]["probe_offset"]
+			if type(tmp) == int or type(tmp) == float:
+				probe_offset = float(tmp)
+			else:
+				print("Probe offset was not defined correctly in \"config.yaml\"")
 
 		# remove all the probe inputs
 		for i in range(1,10):
@@ -1509,7 +1658,7 @@ class Dorna(_port_usb, easy_method):
 		if _result == None:
 			return None
 		_result = json.loads(_result)
-		t3 = - _result[4]
+		t3 = _result[4] - probe_offset
 
 		# back to where it started
 		command = {"command": "move", "prm": {"path": "joint", "movement": 0, "j4": 0, "speed": 5000}}
@@ -1536,7 +1685,7 @@ class Dorna(_port_usb, easy_method):
 		if _result == None:
 			return None
 		_result = json.loads(_result)
-		t4 = - _result[4]
+		t4 = -_result[4] - probe_offset
 
 		# back to where it started
 		command = {"command": "move", "prm": {"path": "joint", "movement": 0, "j4": 0, "speed": 5000}}
@@ -1548,12 +1697,13 @@ class Dorna(_port_usb, easy_method):
 		if not wait:
 			return None
 
-		travel = [-t3, -t4]
-		#joint = [0.5*(travel[1]-travel[0]), -0.5*(travel[1]+travel[0])]
-		joint = [0.5*(travel[1]-travel[0]), 0.5*(travel[1]+travel[0])]
-		# set_joint
-		#return self.set_joint({"j3": self._config["calibrate"]["j3"] + -(m4-m3)/2, "j4": self._config["calibrate"]["j4"] + (m4+m3)/2}, True)
-		return self.set_joint({"j3": self._config["calibrate"]["j3"] + joint[0], "j4": self._config["calibrate"]["j4"] + joint[1]}, True)
+		# Calculate the joint offsets
+		# j3 will be in the range [-90, 90)
+		# j4 will be in the range [-180, 180)
+		j3 = wrap(-0.5 * (wrap(t3,-180,180) + wrap(t4,-180,180)) , -90, 90)
+		j4 = 0.5 * (wrap(t4,-180,180) - wrap(t3,-180,180))
+		# Apply the calibration offsets saved in the yaml file
+		return self.set_joint({"j3": self._config["calibrate"]["j3"] + j3, "j4": self._config["calibrate"]["j4"] + j4}, True)
 
 
 
@@ -2076,6 +2226,7 @@ class Dorna(_port_usb, easy_method):
 				try:
 					rsp = self._port_read()
 					if rsp:
+						self.last_received = rsp
 						self._process_response(rsp)
 						_error = 0
 
@@ -2172,6 +2323,7 @@ class Dorna(_port_usb, easy_method):
 		if 'r' in response:
 			self._system["lines_to_send"]  = min(4, self._system["lines_to_send"] + 1)
 			#_r = dict(response["r"])
+			self.last_response = response["r"]
 			_r = copy.deepcopy(response["r"])
 			if "f" in response:
 				_r["f"] = response["f"]
@@ -3707,7 +3859,7 @@ class Dorna(_port_usb, easy_method):
 			gc_list.append("{jt : "+str(prm["jt"]) +"}")
 		if "ct" in prm:
 			gc_list.append("{ct : "+str(prm["ct"]) +"}")
-		if "gpa" in prm:
+		if "pcm" in prm:
 			gc_list.append("{gpa : "+str(prm["gpa"]) +"}")
 
 		return {'gc_list':gc_list, 'status':0, "travel_final": np.copy(self._system["travel_final"])}
